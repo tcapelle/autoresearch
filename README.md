@@ -82,7 +82,7 @@ The bundle currently contains:
 
 - one small `prepare` manifest that writes data shards and tokenizer files to the shared PVC
 - one indexed `train` Job manifest that launches two parallel pods per apply
-- one-GPU training jobs on the `rtxp6000-8x` node pool with CPU and RAM set to allocatable resources divided by 8 (`15995m` CPU and `131872185Ki` memory)
+- one-GPU training jobs on the `rtxp6000-8x` node pool with CPU and RAM set to allocatable resources divided by 8 (`15995m` CPU and `125Gi` memory)
 
 Useful commands:
 

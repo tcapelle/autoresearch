@@ -66,7 +66,7 @@ spec:
             - name: CPU_REQUEST
               value: "15995m"
             - name: MEMORY_REQUEST
-              value: "131872185Ki"
+              value: "125Gi"
             - name: WANDB_PROJECT
               value: autoresearch
             - name: WANDB_API_KEY
@@ -81,11 +81,11 @@ spec:
             requests:
               nvidia.com/gpu: "1"
               cpu: "15995m"
-              memory: "131872185Ki"
+              memory: "125Gi"
             limits:
               nvidia.com/gpu: "1"
               cpu: "15995m"
-              memory: "131872185Ki"
+              memory: "125Gi"
           volumeMounts:
             - name: shared
               mountPath: /mnt/autoresearch
