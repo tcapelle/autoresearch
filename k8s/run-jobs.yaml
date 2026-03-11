@@ -69,6 +69,7 @@ spec:
               value: "125Gi"
             - name: WANDB_PROJECT
               value: autoresearch
+            # EXTRA_ENV
             - name: WANDB_API_KEY
               valueFrom:
                 secretKeyRef:
