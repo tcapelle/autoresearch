@@ -19,6 +19,40 @@ import torch.nn as nn
 import torch.nn.functional as F
 import wandb
 
+def _env_override(name, default, parser):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = parser(raw)
+    except ValueError as exc:
+        raise ValueError(f"Invalid {name}={raw!r}") from exc
+    print(f"Override {name}={value}")
+    return value
+
+
+def _env_bool(name, default):
+    def parse(raw):
+        normalized = raw.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        raise ValueError("expected one of 1/0/true/false/yes/no/on/off")
+
+    return _env_override(name, default, parse)
+
+
+def _env_choice(name, default, choices):
+    def parse(raw):
+        normalized = raw.strip().lower()
+        if normalized not in choices:
+            raise ValueError(f"expected one of {sorted(choices)}")
+        return normalized
+
+    return _env_override(name, default, parse)
+
+
 def _detect_torch_compile_mode():
     if os.environ.get("AUTORESEARCH_DISABLE_TORCH_COMPILE") == "1":
         return False, "AUTORESEARCH_DISABLE_TORCH_COMPILE=1"
@@ -64,12 +98,21 @@ class GPTConfig:
     window_pattern: str = "SSSL"
 
 
+VALUE_EMBEDS_MODE = _env_choice("AUTORESEARCH_VALUE_EMBEDS_MODE", "alternate", {"alternate", "none"})
+QK_NORM = _env_bool("AUTORESEARCH_QK_NORM", True)
+LOGIT_SOFTCAP = _env_override("AUTORESEARCH_LOGIT_SOFTCAP", 15.0, float)
+RESID_INIT = _env_override("AUTORESEARCH_RESID_INIT", 1.0, float)
+X0_INIT = _env_override("AUTORESEARCH_X0_INIT", 0.1, float)
+
+
 def norm(x):
     return F.rms_norm(x, (x.size(-1),))
 
 
 def has_ve(layer_idx, n_layer):
     """Returns True if layer should have Value Embedding (alternating, last always included)."""
+    if VALUE_EMBEDS_MODE == "none":
+        return False
     return layer_idx % 2 == (n_layer - 1) % 2
 
 
@@ -130,7 +173,8 @@ class CausalSelfAttention(nn.Module):
 
         cos, sin = cos_sin
         q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
-        q, k = norm(q), norm(k)
+        if QK_NORM:
+            q, k = norm(q), norm(k)
 
         if USE_FA3:
             y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
@@ -219,8 +263,8 @@ class GPT(nn.Module):
             torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
         # Per-layer scalars
-        self.resid_lambdas.fill_(1.0)
-        self.x0_lambdas.fill_(0.1)
+        self.resid_lambdas.fill_(RESID_INIT)
+        self.x0_lambdas.fill_(X0_INIT)
         # Value embeddings
         for ve in self.value_embeds.values():
             torch.nn.init.uniform_(ve.weight, -s, s)
@@ -336,10 +380,10 @@ class GPT(nn.Module):
             x = block(x, ve, cos_sin, self.window_sizes[i])
         x = norm(x)
 
-        softcap = 15
         logits = self.lm_head(x)
         logits = logits.float()
-        logits = softcap * torch.tanh(logits / softcap)
+        if LOGIT_SOFTCAP > 0:
+            logits = LOGIT_SOFTCAP * torch.tanh(logits / LOGIT_SOFTCAP)
 
         if targets is not None:
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1),
@@ -486,17 +530,6 @@ class MuonAdamW(torch.optim.Optimizer):
 # Hyperparameters (edit these directly, no CLI flags needed)
 # ---------------------------------------------------------------------------
 
-def _env_override(name, default, parser):
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        value = parser(raw)
-    except ValueError as exc:
-        raise ValueError(f"Invalid {name}={raw!r}") from exc
-    print(f"Override {name}={value}")
-    return value
-
 # Model architecture
 ASPECT_RATIO = 64       # model_dim = depth * ASPECT_RATIO
 HEAD_DIM = 128          # target head dimension for attention
@@ -608,6 +641,11 @@ try:
                 "aspect_ratio": ASPECT_RATIO,
                 "head_dim": HEAD_DIM,
                 "window_pattern": WINDOW_PATTERN,
+                "value_embeds_mode": VALUE_EMBEDS_MODE,
+                "qk_norm": QK_NORM,
+                "logit_softcap": LOGIT_SOFTCAP,
+                "resid_init": RESID_INIT,
+                "x0_init": X0_INIT,
                 "depth": DEPTH,
                 "device_batch_size": DEVICE_BATCH_SIZE,
                 "total_batch_size": TOTAL_BATCH_SIZE,
