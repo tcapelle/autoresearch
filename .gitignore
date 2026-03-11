@@ -18,6 +18,9 @@ AGENTS.md
 
 # Experimental code/artifacts
 dev/
+.cache/
+run.log
+wandb/
 
 # Results file
 results.tsv

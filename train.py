@@ -10,18 +10,21 @@ os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
 import gc
 import math
+import shutil
 import time
 from dataclasses import dataclass, asdict
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import wandb
 
-from kernels import get_kernel
 cap = torch.cuda.get_device_capability()
-# varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
-repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
-fa3 = get_kernel(repo).flash_attn_interface
+USE_FA3 = cap == (9, 0)
+fa3 = None
+if USE_FA3:
+    from kernels import get_kernel
+    fa3 = get_kernel("varunneal/flash-attention-3").flash_attn_interface
 
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
 
@@ -73,6 +76,24 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
         self.ve_gate_channels = 32
         self.ve_gate = nn.Linear(self.ve_gate_channels, self.n_kv_head, bias=False) if has_ve(layer_idx, config.n_layer) else None
+        self.register_buffer("_sdpa_mask", torch.empty(0, dtype=torch.bool), persistent=False)
+        self._sdpa_window = None
+
+    def _get_sdpa_mask(self, seq_len, window, device):
+        if window >= seq_len:
+            return None
+        if (
+            self._sdpa_mask.numel() == 0
+            or self._sdpa_mask.size(0) != seq_len
+            or self._sdpa_mask.device != device
+            or self._sdpa_window != window
+        ):
+            idx = torch.arange(seq_len, device=device)
+            mask = idx[None, :] <= idx[:, None]
+            mask &= idx[None, :] >= (idx[:, None] - window + 1)
+            self._sdpa_mask = mask
+            self._sdpa_window = window
+        return self._sdpa_mask
 
     def forward(self, x, ve, cos_sin, window_size):
         B, T, C = x.size()
@@ -90,8 +111,23 @@ class CausalSelfAttention(nn.Module):
         q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
         q, k = norm(q), norm(k)
 
-        y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
-        y = y.contiguous().view(B, T, -1)
+        if USE_FA3:
+            y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+            y = y.contiguous().view(B, T, -1)
+        else:
+            if self.n_kv_head != self.n_head:
+                repeat = self.n_head // self.n_kv_head
+                k = k.repeat_interleave(repeat, dim=2)
+                v = v.repeat_interleave(repeat, dim=2)
+            attn_mask = self._get_sdpa_mask(T, window_size[0], q.device)
+            y = F.scaled_dot_product_attention(
+                q.transpose(1, 2),
+                k.transpose(1, 2),
+                v.transpose(1, 2),
+                attn_mask=attn_mask,
+                is_causal=attn_mask is None,
+            )
+            y = y.transpose(1, 2).contiguous().view(B, T, -1)
         y = self.c_proj(y)
         return y
 
@@ -449,6 +485,7 @@ FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
 # Model size
 DEPTH = 8               # number of transformer layers
 DEVICE_BATCH_SIZE = 128  # per-device batch size (reduce if OOM)
+WANDB_LOG_INTERVAL = 10  # logging cadence in optimizer steps
 
 # ---------------------------------------------------------------------------
 # Setup: tokenizer, model, optimizer, dataloader
@@ -505,13 +542,78 @@ optimizer = model.setup_optimizer(
     weight_decay=WEIGHT_DECAY,
 )
 
-model = torch.compile(model, dynamic=False)
+compile_disable_reason = None
+if os.environ.get("AUTORESEARCH_DISABLE_TORCH_COMPILE") == "1":
+    compile_disable_reason = "AUTORESEARCH_DISABLE_TORCH_COMPILE=1"
+else:
+    compiler = os.environ.get("CC")
+    compiler_exe = compiler.split()[0] if compiler else "cc"
+    if shutil.which(compiler_exe) is None:
+        compile_disable_reason = f"C compiler {compiler_exe!r} not found"
+
+if compile_disable_reason is None:
+    model = torch.compile(model, dynamic=False)
+else:
+    print(f"torch.compile disabled: {compile_disable_reason}")
 
 train_loader = make_dataloader(tokenizer, DEVICE_BATCH_SIZE, MAX_SEQ_LEN, "train")
 x, y, epoch = next(train_loader)  # prefetch first batch
 
 print(f"Time budget: {TIME_BUDGET}s")
 print(f"Gradient accumulation steps: {grad_accum_steps}")
+
+wandb_mode = os.environ.get("WANDB_MODE")
+if wandb_mode is None and not os.environ.get("WANDB_API_KEY"):
+    wandb_mode = "disabled"
+
+wandb_run = None
+try:
+    wandb_kwargs = {
+        "project": os.environ.get("WANDB_PROJECT", "autoresearch"),
+        "entity": os.environ.get("WANDB_ENTITY"),
+        "name": os.environ.get("WANDB_RUN_NAME") or os.environ.get("JOB_NAME"),
+        "dir": os.environ.get("WANDB_DIR"),
+        "mode": wandb_mode,
+        "config": {
+            "git_sha": os.environ.get("AUTORESEARCH_GIT_SHA"),
+            "source_hash": os.environ.get("AUTORESEARCH_SOURCE_HASH"),
+            "model": asdict(config),
+            "hyperparameters": {
+                "aspect_ratio": ASPECT_RATIO,
+                "head_dim": HEAD_DIM,
+                "window_pattern": WINDOW_PATTERN,
+                "depth": DEPTH,
+                "device_batch_size": DEVICE_BATCH_SIZE,
+                "total_batch_size": TOTAL_BATCH_SIZE,
+                "embedding_lr": EMBEDDING_LR,
+                "unembedding_lr": UNEMBEDDING_LR,
+                "matrix_lr": MATRIX_LR,
+                "scalar_lr": SCALAR_LR,
+                "weight_decay": WEIGHT_DECAY,
+                "adam_betas": ADAM_BETAS,
+                "warmup_ratio": WARMUP_RATIO,
+                "warmdown_ratio": WARMDOWN_RATIO,
+                "final_lr_frac": FINAL_LR_FRAC,
+            },
+            "runtime": {
+                "sequence_len": MAX_SEQ_LEN,
+                "time_budget_s": TIME_BUDGET,
+                "grad_accum_steps": grad_accum_steps,
+                "vocab_size": vocab_size,
+                "num_params": num_params,
+                "estimated_flops_per_token": num_flops_per_token,
+            },
+            "param_counts": param_counts,
+        },
+    }
+    wandb_kwargs = {k: v for k, v in wandb_kwargs.items() if v is not None}
+    wandb_run = wandb.init(**wandb_kwargs)
+    wandb_run.define_metric("train/step")
+    for prefix in ("train/*", "perf/*", "eval/*", "system/*"):
+        wandb_run.define_metric(prefix, step_metric="train/step")
+except Exception as exc:
+    print(f"W&B init failed, continuing without logging: {exc}")
+    wandb_run = None
 
 # Schedules (all based on progress = training_time / TIME_BUDGET)
 
@@ -568,6 +670,9 @@ while True:
 
     # Fast fail: abort if loss is exploding or NaN
     if math.isnan(train_loss_f) or train_loss_f > 100:
+        if wandb_run is not None:
+            wandb_run.log({"train/step": step, "train/loss_raw": train_loss_f, "system/fail": 1}, step=step)
+            wandb_run.finish(exit_code=1)
         print("FAIL")
         exit(1)
 
@@ -588,6 +693,21 @@ while True:
     remaining = max(0, TIME_BUDGET - total_training_time)
 
     print(f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt*1000:.0f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.1f}% | epoch: {epoch} | remaining: {remaining:.0f}s    ", end="", flush=True)
+    if wandb_run is not None and (step % WANDB_LOG_INTERVAL == 0):
+        wandb_run.log({
+            "train/step": step,
+            "train/loss_raw": train_loss_f,
+            "train/loss_ema": debiased_smooth_loss,
+            "train/lr_multiplier": lrm,
+            "train/muon_momentum": muon_momentum,
+            "train/weight_decay": muon_weight_decay,
+            "perf/step_time_s": dt,
+            "perf/tokens_per_sec": tok_per_sec,
+            "perf/mfu_percent": mfu,
+            "perf/training_time_s": total_training_time,
+            "perf/progress_percent": pct_done,
+            "system/epoch": epoch,
+        }, step=step)
 
     # GC management (Python's GC causes ~500ms stalls)
     if step == 0:
@@ -628,3 +748,20 @@ print(f"total_tokens_M:   {total_tokens / 1e6:.1f}")
 print(f"num_steps:        {step}")
 print(f"num_params_M:     {num_params / 1e6:.1f}")
 print(f"depth:            {DEPTH}")
+
+if wandb_run is not None:
+    summary = {
+        "train/step": step,
+        "eval/val_bpb": val_bpb,
+        "perf/training_seconds": total_training_time,
+        "perf/total_seconds": t_end - t_start,
+        "perf/mfu_percent": steady_state_mfu,
+        "perf/total_tokens_M": total_tokens / 1e6,
+        "system/peak_vram_mb": peak_vram_mb,
+        "system/num_steps": step,
+        "system/num_params_M": num_params / 1e6,
+        "system/depth": DEPTH,
+    }
+    wandb_run.log(summary, step=step)
+    wandb_run.summary.update(summary)
+    wandb_run.finish()

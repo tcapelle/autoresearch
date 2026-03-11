@@ -35,7 +35,15 @@ EVAL_TOKENS = 40 * 524288  # number of tokens for val eval
 # Configuration
 # ---------------------------------------------------------------------------
 
-CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "autoresearch")
+def _resolve_cache_dir():
+    # Allow cluster jobs to keep the cache on persistent shared storage.
+    cache_dir = os.environ.get("AUTORESEARCH_CACHE_DIR")
+    if cache_dir:
+        return os.path.abspath(os.path.expanduser(cache_dir))
+    return os.path.join(os.path.expanduser("~"), ".cache", "autoresearch")
+
+
+CACHE_DIR = _resolve_cache_dir()
 DATA_DIR = os.path.join(CACHE_DIR, "data")
 TOKENIZER_DIR = os.path.join(CACHE_DIR, "tokenizer")
 BASE_URL = "https://huggingface.co/datasets/karpathy/climbmix-400b-shuffle/resolve/main"

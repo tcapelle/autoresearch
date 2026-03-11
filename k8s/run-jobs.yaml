@@ -1,0 +1,396 @@
+# Apply this bundle after pushing the branch below. The jobs clone GitHub and
+# run directly from that checkout; no local source upload step is involved.
+# To launch a fresh batch later, delete these Jobs first or copy the file and
+# change the Job names.
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: autoresearch-prepare-pai-git-jobs
+  labels:
+    app: autoresearch
+    run-group: pai-git-jobs
+    mode: prepare
+spec:
+  ttlSecondsAfterFinished: 604800
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  template:
+    metadata:
+      labels:
+        app: autoresearch
+        run-group: pai-git-jobs
+        mode: prepare
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: clone-repo
+          image: alpine/git:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-lc"]
+          args:
+            - |
+              set -eu
+              rm -rf /workspace/repo
+              git clone --depth 1 --single-branch --branch codex/pai-git-jobs \
+                https://github.com/tcapelle/autoresearch.git /workspace/repo
+              git -C /workspace/repo rev-parse HEAD > /workspace/git-sha.txt
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+      containers:
+        - name: prepare
+          image: pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-lc"]
+          env:
+            - name: JOB_NAME
+              value: autoresearch-prepare-pai-git-jobs
+            - name: GIT_REPO
+              value: https://github.com/tcapelle/autoresearch.git
+            - name: GIT_BRANCH
+              value: codex/pai-git-jobs
+            - name: AUTORESEARCH_CACHE_DIR
+              value: /mnt/autoresearch/cache
+            - name: UV_CACHE_DIR
+              value: /mnt/autoresearch/uv-cache
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          args:
+            - |
+              set -euo pipefail
+              export REPO_DIR=/workspace/repo
+              export RUN_DIR=/mnt/autoresearch/jobs/"$JOB_NAME"
+              export AUTORESEARCH_GIT_SHA="$(cat /workspace/git-sha.txt)"
+              mkdir -p "$RUN_DIR" "$AUTORESEARCH_CACHE_DIR" "$UV_CACHE_DIR"
+              {
+                echo "job_name=$JOB_NAME"
+                echo "git_repo=$GIT_REPO"
+                echo "git_branch=$GIT_BRANCH"
+                echo "git_sha=$AUTORESEARCH_GIT_SHA"
+                echo "submitted_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              } > "$RUN_DIR/metadata.txt"
+              cd "$REPO_DIR"
+              if ! command -v uv >/dev/null 2>&1; then
+                python -m pip install --no-input --quiet uv
+              fi
+              uv sync --frozen
+              uv run prepare.py --num-shards 10 2>&1 | tee "$RUN_DIR/prepare.log"
+          resources:
+            requests:
+              cpu: "4000m"
+              memory: "32Gi"
+            limits:
+              cpu: "4000m"
+              memory: "32Gi"
+          volumeMounts:
+            - name: shared
+              mountPath: /mnt/autoresearch
+            - name: workspace
+              mountPath: /workspace
+      volumes:
+        - name: shared
+          persistentVolumeClaim:
+            claimName: autoresearch-shared
+        - name: workspace
+          emptyDir: {}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: autoresearch-train-pai-git-jobs-00
+  labels:
+    app: autoresearch
+    run-group: pai-git-jobs
+    mode: train
+spec:
+  ttlSecondsAfterFinished: 604800
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  template:
+    metadata:
+      labels:
+        app: autoresearch
+        run-group: pai-git-jobs
+        mode: train
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        gpu.nvidia.com/class: rtxp6000-8x
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+      initContainers:
+        - name: clone-repo
+          image: alpine/git:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-lc"]
+          args:
+            - |
+              set -eu
+              rm -rf /workspace/repo
+              git clone --depth 1 --single-branch --branch codex/pai-git-jobs \
+                https://github.com/tcapelle/autoresearch.git /workspace/repo
+              git -C /workspace/repo rev-parse HEAD > /workspace/git-sha.txt
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+        - name: wait-for-prepare
+          image: alpine/git:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-lc"]
+          args:
+            - |
+              set -eu
+              until [ -f /mnt/autoresearch/cache/tokenizer/tokenizer.pkl ] \
+                && [ -f /mnt/autoresearch/cache/tokenizer/token_bytes.pt ] \
+                && [ -f /mnt/autoresearch/cache/data/shard_06542.parquet ] \
+                && [ "$(find /mnt/autoresearch/cache/data -maxdepth 1 -name 'shard_*.parquet' | wc -l)" -ge 2 ]; do
+                echo "waiting for prepared data on PVC..."
+                sleep 15
+              done
+          volumeMounts:
+            - name: shared
+              mountPath: /mnt/autoresearch
+      containers:
+        - name: train
+          image: pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-lc"]
+          env:
+            - name: JOB_NAME
+              value: autoresearch-train-pai-git-jobs-00
+            - name: GIT_REPO
+              value: https://github.com/tcapelle/autoresearch.git
+            - name: GIT_BRANCH
+              value: codex/pai-git-jobs
+            - name: AUTORESEARCH_CACHE_DIR
+              value: /mnt/autoresearch/cache
+            - name: UV_CACHE_DIR
+              value: /mnt/autoresearch/uv-cache
+            - name: WANDB_PROJECT
+              value: autoresearch
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: autoresearch-wandb
+                  key: WANDB_API_KEY
+                  optional: true
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          args:
+            - |
+              set -euo pipefail
+              export REPO_DIR=/workspace/repo
+              export RUN_DIR=/mnt/autoresearch/jobs/"$JOB_NAME"
+              export AUTORESEARCH_GIT_SHA="$(cat /workspace/git-sha.txt)"
+              export HF_HOME="$RUN_DIR/hf-home"
+              export XDG_CACHE_HOME="$RUN_DIR/xdg-cache"
+              export TORCHINDUCTOR_CACHE_DIR="$RUN_DIR/torchinductor"
+              export TRITON_CACHE_DIR="$RUN_DIR/triton-cache"
+              export WANDB_DIR="$RUN_DIR/wandb"
+              export WANDB_RUN_NAME="$JOB_NAME"
+              mkdir -p \
+                "$RUN_DIR" \
+                "$AUTORESEARCH_CACHE_DIR" \
+                "$UV_CACHE_DIR" \
+                "$HF_HOME" \
+                "$XDG_CACHE_HOME" \
+                "$TORCHINDUCTOR_CACHE_DIR" \
+                "$TRITON_CACHE_DIR" \
+                "$WANDB_DIR"
+              {
+                echo "job_name=$JOB_NAME"
+                echo "git_repo=$GIT_REPO"
+                echo "git_branch=$GIT_BRANCH"
+                echo "git_sha=$AUTORESEARCH_GIT_SHA"
+                echo "submitted_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                echo "gpu=1"
+                echo "cpu=15995m"
+                echo "memory=131872185Ki"
+              } > "$RUN_DIR/metadata.txt"
+              cd "$REPO_DIR"
+              if ! command -v uv >/dev/null 2>&1; then
+                python -m pip install --no-input --quiet uv
+              fi
+              uv sync --frozen
+              uv run train.py 2>&1 | tee "$RUN_DIR/run.log"
+              grep '^val_bpb:\|^peak_vram_mb:\|^training_seconds:\|^total_seconds:\|^mfu_percent:\|^total_tokens_M:\|^num_steps:\|^num_params_M:\|^depth:' \
+                "$RUN_DIR/run.log" | tee "$RUN_DIR/summary.txt" || true
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+              cpu: "15995m"
+              memory: "131872185Ki"
+            limits:
+              nvidia.com/gpu: "1"
+              cpu: "15995m"
+              memory: "131872185Ki"
+          volumeMounts:
+            - name: shared
+              mountPath: /mnt/autoresearch
+            - name: workspace
+              mountPath: /workspace
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: shared
+          persistentVolumeClaim:
+            claimName: autoresearch-shared
+        - name: workspace
+          emptyDir: {}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: autoresearch-train-pai-git-jobs-01
+  labels:
+    app: autoresearch
+    run-group: pai-git-jobs
+    mode: train
+spec:
+  ttlSecondsAfterFinished: 604800
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  template:
+    metadata:
+      labels:
+        app: autoresearch
+        run-group: pai-git-jobs
+        mode: train
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        gpu.nvidia.com/class: rtxp6000-8x
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+      initContainers:
+        - name: clone-repo
+          image: alpine/git:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-lc"]
+          args:
+            - |
+              set -eu
+              rm -rf /workspace/repo
+              git clone --depth 1 --single-branch --branch codex/pai-git-jobs \
+                https://github.com/tcapelle/autoresearch.git /workspace/repo
+              git -C /workspace/repo rev-parse HEAD > /workspace/git-sha.txt
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+        - name: wait-for-prepare
+          image: alpine/git:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-lc"]
+          args:
+            - |
+              set -eu
+              until [ -f /mnt/autoresearch/cache/tokenizer/tokenizer.pkl ] \
+                && [ -f /mnt/autoresearch/cache/tokenizer/token_bytes.pt ] \
+                && [ -f /mnt/autoresearch/cache/data/shard_06542.parquet ] \
+                && [ "$(find /mnt/autoresearch/cache/data -maxdepth 1 -name 'shard_*.parquet' | wc -l)" -ge 2 ]; do
+                echo "waiting for prepared data on PVC..."
+                sleep 15
+              done
+          volumeMounts:
+            - name: shared
+              mountPath: /mnt/autoresearch
+      containers:
+        - name: train
+          image: pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-lc"]
+          env:
+            - name: JOB_NAME
+              value: autoresearch-train-pai-git-jobs-01
+            - name: GIT_REPO
+              value: https://github.com/tcapelle/autoresearch.git
+            - name: GIT_BRANCH
+              value: codex/pai-git-jobs
+            - name: AUTORESEARCH_CACHE_DIR
+              value: /mnt/autoresearch/cache
+            - name: UV_CACHE_DIR
+              value: /mnt/autoresearch/uv-cache
+            - name: WANDB_PROJECT
+              value: autoresearch
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: autoresearch-wandb
+                  key: WANDB_API_KEY
+                  optional: true
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          args:
+            - |
+              set -euo pipefail
+              export REPO_DIR=/workspace/repo
+              export RUN_DIR=/mnt/autoresearch/jobs/"$JOB_NAME"
+              export AUTORESEARCH_GIT_SHA="$(cat /workspace/git-sha.txt)"
+              export HF_HOME="$RUN_DIR/hf-home"
+              export XDG_CACHE_HOME="$RUN_DIR/xdg-cache"
+              export TORCHINDUCTOR_CACHE_DIR="$RUN_DIR/torchinductor"
+              export TRITON_CACHE_DIR="$RUN_DIR/triton-cache"
+              export WANDB_DIR="$RUN_DIR/wandb"
+              export WANDB_RUN_NAME="$JOB_NAME"
+              mkdir -p \
+                "$RUN_DIR" \
+                "$AUTORESEARCH_CACHE_DIR" \
+                "$UV_CACHE_DIR" \
+                "$HF_HOME" \
+                "$XDG_CACHE_HOME" \
+                "$TORCHINDUCTOR_CACHE_DIR" \
+                "$TRITON_CACHE_DIR" \
+                "$WANDB_DIR"
+              {
+                echo "job_name=$JOB_NAME"
+                echo "git_repo=$GIT_REPO"
+                echo "git_branch=$GIT_BRANCH"
+                echo "git_sha=$AUTORESEARCH_GIT_SHA"
+                echo "submitted_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                echo "gpu=1"
+                echo "cpu=15995m"
+                echo "memory=131872185Ki"
+              } > "$RUN_DIR/metadata.txt"
+              cd "$REPO_DIR"
+              if ! command -v uv >/dev/null 2>&1; then
+                python -m pip install --no-input --quiet uv
+              fi
+              uv sync --frozen
+              uv run train.py 2>&1 | tee "$RUN_DIR/run.log"
+              grep '^val_bpb:\|^peak_vram_mb:\|^training_seconds:\|^total_seconds:\|^mfu_percent:\|^total_tokens_M:\|^num_steps:\|^num_params_M:\|^depth:' \
+                "$RUN_DIR/run.log" | tee "$RUN_DIR/summary.txt" || true
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+              cpu: "15995m"
+              memory: "131872185Ki"
+            limits:
+              nvidia.com/gpu: "1"
+              cpu: "15995m"
+              memory: "131872185Ki"
+          volumeMounts:
+            - name: shared
+              mountPath: /mnt/autoresearch
+            - name: workspace
+              mountPath: /workspace
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: shared
+          persistentVolumeClaim:
+            claimName: autoresearch-shared
+        - name: workspace
+          emptyDir: {}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi

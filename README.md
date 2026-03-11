@@ -30,6 +30,9 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # 2. Install dependencies
 uv sync
 
+# Optional: enable Weights & Biases logging
+export WANDB_API_KEY=your_key
+
 # 3. Download data and train tokenizer (one-time, ~2 min)
 uv run prepare.py
 
@@ -38,6 +41,48 @@ uv run train.py
 ```
 
 If the above commands all work ok, your setup is working and you can go into autonomous research mode.
+
+## Run On `pai` Kubernetes
+
+This repo now uses plain Kubernetes manifests for `pai-amf1-cfd`. The jobs clone this GitHub repo from the branch baked into [k8s/run-jobs.yaml](k8s/run-jobs.yaml), preprocess onto the shared PVC, and then run `train.py` from that checkout.
+
+Apply the shared RWX PVC once:
+
+```bash
+kubectl --context pai-amf1-cfd apply -f k8s/pvc.yaml
+```
+
+Create or update the optional W&B secret:
+
+```bash
+kubectl --context pai-amf1-cfd create secret generic autoresearch-wandb \
+  --from-literal=WANDB_API_KEY="$WANDB_API_KEY" \
+  --dry-run=client -o yaml | kubectl --context pai-amf1-cfd apply -f -
+```
+
+Launch the current bundle:
+
+```bash
+kubectl --context pai-amf1-cfd apply -f k8s/run-jobs.yaml
+```
+
+To start a fresh batch later, delete the existing `Job` objects first or copy `k8s/run-jobs.yaml` and change the job names.
+
+The bundle currently contains:
+
+- one CPU-only `prepare` job that writes data shards and tokenizer files to the shared PVC
+- two parallel `train` jobs that wait for those prepared PVC artifacts before starting
+- one-GPU training jobs on the `rtxp6000-8x` node pool with CPU and RAM set to allocatable resources divided by 8 (`15995m` CPU and `131872185Ki` memory)
+
+Useful commands:
+
+```bash
+kubectl --context pai-amf1-cfd get jobs -l app=autoresearch
+kubectl --context pai-amf1-cfd logs -f job/autoresearch-train-pai-git-jobs-00
+kubectl --context pai-amf1-cfd logs -f job/autoresearch-train-pai-git-jobs-01
+```
+
+The shared training cache is stored on the PVC through `AUTORESEARCH_CACHE_DIR`, so the tokenizer, data shards, HF cache, and `uv` wheel cache are reused across jobs. Logs, W&B files, and per-job caches are written under `/mnt/autoresearch/jobs/<job-name>/`.
 
 ## Running the agent
 
