@@ -571,8 +571,8 @@ ADAM_BETAS = (
     _env_override("AUTORESEARCH_ADAM_BETA2", 0.95, float),
 ) # Adam beta1, beta2
 WARMUP_RATIO = _env_override("AUTORESEARCH_WARMUP_RATIO", 0.0, float) # fraction of time budget for LR warmup
-WARMDOWN_RATIO = _env_override("AUTORESEARCH_WARMDOWN_RATIO", 0.82, float) # fraction of time budget for LR warmdown
-FINAL_LR_FRAC = _env_override("AUTORESEARCH_FINAL_LR_FRAC", 0.03, float) # final LR as fraction of initial
+WARMDOWN_RATIO = _env_override("AUTORESEARCH_WARMDOWN_RATIO", 0.84, float) # fraction of time budget for LR warmdown
+FINAL_LR_FRAC = _env_override("AUTORESEARCH_FINAL_LR_FRAC", 0.033, float) # final LR as fraction of initial
 
 # Model size
 DEPTH = 8               # number of transformer layers
