@@ -98,7 +98,11 @@ class GPTConfig:
     window_pattern: str = "SSSL"
 
 
-VALUE_EMBEDS_MODE = _env_choice("AUTORESEARCH_VALUE_EMBEDS_MODE", "alternate", {"alternate", "none"})
+VALUE_EMBEDS_MODE = _env_choice(
+    "AUTORESEARCH_VALUE_EMBEDS_MODE",
+    "alternate",
+    {"alternate", "none", "last", "last2", "firstlast"},
+)
 QK_NORM = _env_bool("AUTORESEARCH_QK_NORM", True)
 LOGIT_SOFTCAP = _env_override("AUTORESEARCH_LOGIT_SOFTCAP", 15.0, float)
 RESID_INIT = _env_override("AUTORESEARCH_RESID_INIT", 1.0, float)
@@ -113,6 +117,12 @@ def has_ve(layer_idx, n_layer):
     """Returns True if layer should have Value Embedding (alternating, last always included)."""
     if VALUE_EMBEDS_MODE == "none":
         return False
+    if VALUE_EMBEDS_MODE == "last":
+        return layer_idx == n_layer - 1
+    if VALUE_EMBEDS_MODE == "last2":
+        return layer_idx >= n_layer - 2
+    if VALUE_EMBEDS_MODE == "firstlast":
+        return layer_idx == 0 or layer_idx == n_layer - 1
     return layer_idx % 2 == (n_layer - 1) % 2
 
 
