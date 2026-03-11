@@ -335,7 +335,8 @@ class GPT(nn.Module):
         }
 
     def setup_optimizer(self, unembedding_lr=0.004, embedding_lr=0.2, matrix_lr=0.02,
-                        weight_decay=0.0, adam_betas=(0.8, 0.95), scalar_lr=0.5):
+                        weight_decay=0.0, adam_betas=(0.8, 0.95), scalar_lr=0.5,
+                        muon_beta2=0.95, muon_ns_steps=5):
         model_dim = self.config.n_embd
         matrix_params = list(self.transformer.h.parameters())
         value_embeds_params = list(self.value_embeds.parameters())
@@ -359,7 +360,7 @@ class GPT(nn.Module):
             group_params = [p for p in matrix_params if p.shape == shape]
             param_groups.append(dict(
                 kind='muon', params=group_params, lr=matrix_lr,
-                momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=weight_decay,
+                momentum=0.95, ns_steps=muon_ns_steps, beta2=muon_beta2, weight_decay=weight_decay,
             ))
         optimizer = MuonAdamW(param_groups)
         for group in optimizer.param_groups:
@@ -542,6 +543,11 @@ UNEMBEDDING_LR = _env_override("AUTORESEARCH_UNEMBEDDING_LR", 0.004, float) # le
 MATRIX_LR = _env_override("AUTORESEARCH_MATRIX_LR", 0.04, float) # learning rate for matrix parameters (Muon)
 SCALAR_LR = _env_override("AUTORESEARCH_SCALAR_LR", 0.5, float) # learning rate for per-layer scalars (Adam)
 WEIGHT_DECAY = _env_override("AUTORESEARCH_WEIGHT_DECAY", 0.2, float) # cautious weight decay for Muon
+MUON_BETA2 = _env_override("AUTORESEARCH_MUON_BETA2", 0.95, float) # second-moment decay for Muon variance reduction
+MUON_NS_STEPS = _env_override("AUTORESEARCH_MUON_NS_STEPS", 5, int) # Newton-Schulz orthogonalization iterations
+MUON_MOMENTUM_START = _env_override("AUTORESEARCH_MUON_MOMENTUM_START", 0.85, float) # starting Muon momentum
+MUON_MOMENTUM_END = _env_override("AUTORESEARCH_MUON_MOMENTUM_END", 0.95, float) # ending Muon momentum
+MUON_WD_FINAL_FRAC = _env_override("AUTORESEARCH_MUON_WD_FINAL_FRAC", 0.0, float) # final Muon weight decay as fraction of initial
 ADAM_BETAS = (
     _env_override("AUTORESEARCH_ADAM_BETA1", 0.75, float),
     _env_override("AUTORESEARCH_ADAM_BETA2", 0.95, float),
@@ -608,6 +614,8 @@ optimizer = model.setup_optimizer(
     adam_betas=ADAM_BETAS,
     matrix_lr=MATRIX_LR,
     weight_decay=WEIGHT_DECAY,
+    muon_beta2=MUON_BETA2,
+    muon_ns_steps=MUON_NS_STEPS,
 )
 
 if TORCH_COMPILE_ENABLED:
@@ -654,6 +662,11 @@ try:
                 "matrix_lr": MATRIX_LR,
                 "scalar_lr": SCALAR_LR,
                 "weight_decay": WEIGHT_DECAY,
+                "muon_beta2": MUON_BETA2,
+                "muon_ns_steps": MUON_NS_STEPS,
+                "muon_momentum_start": MUON_MOMENTUM_START,
+                "muon_momentum_end": MUON_MOMENTUM_END,
+                "muon_wd_final_frac": MUON_WD_FINAL_FRAC,
                 "adam_betas": ADAM_BETAS,
                 "warmup_ratio": WARMUP_RATIO,
                 "warmdown_ratio": WARMDOWN_RATIO,
@@ -692,10 +705,10 @@ def get_lr_multiplier(progress):
 
 def get_muon_momentum(step):
     frac = min(step / 300, 1)
-    return (1 - frac) * 0.85 + frac * 0.95
+    return (1 - frac) * MUON_MOMENTUM_START + frac * MUON_MOMENTUM_END
 
 def get_weight_decay(progress):
-    return WEIGHT_DECAY * (1 - progress)
+    return WEIGHT_DECAY * (1 - (1 - MUON_WD_FINAL_FRAC) * progress)
 
 # ---------------------------------------------------------------------------
 # Training loop
