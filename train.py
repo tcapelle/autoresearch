@@ -107,6 +107,7 @@ QK_NORM = _env_bool("AUTORESEARCH_QK_NORM", True)
 LOGIT_SOFTCAP = _env_override("AUTORESEARCH_LOGIT_SOFTCAP", 15.0, float)
 RESID_INIT = _env_override("AUTORESEARCH_RESID_INIT", 1.0, float)
 X0_INIT = _env_override("AUTORESEARCH_X0_INIT", 0.1, float)
+MLP_ACTIVATION = _env_choice("AUTORESEARCH_MLP_ACTIVATION", "relu2", {"relu2", "relu", "gelu", "silu"})
 
 
 def norm(x):
@@ -215,7 +216,14 @@ class MLP(nn.Module):
 
     def forward(self, x):
         x = self.c_fc(x)
-        x = F.relu(x).square()
+        if MLP_ACTIVATION == "relu2":
+            x = F.relu(x).square()
+        elif MLP_ACTIVATION == "relu":
+            x = F.relu(x)
+        elif MLP_ACTIVATION == "gelu":
+            x = F.gelu(x)
+        else:
+            x = F.silu(x)
         x = self.c_proj(x)
         return x
 
@@ -662,6 +670,7 @@ try:
                 "value_embeds_mode": VALUE_EMBEDS_MODE,
                 "qk_norm": QK_NORM,
                 "logit_softcap": LOGIT_SOFTCAP,
+                "mlp_activation": MLP_ACTIVATION,
                 "resid_init": RESID_INIT,
                 "x0_init": X0_INIT,
                 "depth": DEPTH,
