@@ -107,7 +107,7 @@ QK_NORM = _env_bool("AUTORESEARCH_QK_NORM", True)
 LOGIT_SOFTCAP = _env_override("AUTORESEARCH_LOGIT_SOFTCAP", 15.0, float)
 RESID_INIT = _env_override("AUTORESEARCH_RESID_INIT", 1.0, float)
 X0_INIT = _env_override("AUTORESEARCH_X0_INIT", 0.1, float)
-MLP_ACTIVATION = _env_choice("AUTORESEARCH_MLP_ACTIVATION", "relu2", {"relu2", "relu", "gelu", "silu"})
+MLP_ACTIVATION = _env_choice("AUTORESEARCH_MLP_ACTIVATION", "silu", {"relu2", "relu", "gelu", "silu"})
 
 
 def norm(x):
