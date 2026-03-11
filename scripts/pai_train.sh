@@ -11,7 +11,7 @@ export XDG_CACHE_HOME="$RUN_DIR/xdg-cache"
 export TORCHINDUCTOR_CACHE_DIR="$RUN_DIR/torchinductor"
 export TRITON_CACHE_DIR="$RUN_DIR/triton-cache"
 export WANDB_DIR="$RUN_DIR/wandb"
-export WANDB_RUN_NAME="$JOB_NAME"
+export WANDB_RUN_NAME="${WANDB_RUN_NAME:-$JOB_NAME}"
 
 mkdir -p \
   "$RUN_DIR" \
