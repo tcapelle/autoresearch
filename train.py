@@ -19,6 +19,27 @@ import torch.nn as nn
 import torch.nn.functional as F
 import wandb
 
+def _detect_torch_compile_mode():
+    if os.environ.get("AUTORESEARCH_DISABLE_TORCH_COMPILE") == "1":
+        return False, "AUTORESEARCH_DISABLE_TORCH_COMPILE=1"
+    compiler = os.environ.get("CC")
+    compiler_exe = compiler.split()[0] if compiler else "cc"
+    if shutil.which(compiler_exe) is None:
+        return False, f"C compiler {compiler_exe!r} not found"
+    return True, None
+
+
+TORCH_COMPILE_ENABLED, TORCH_COMPILE_DISABLE_REASON = _detect_torch_compile_mode()
+
+
+def maybe_torch_compile(*, dynamic, fullgraph=False):
+    def decorator(fn):
+        if not TORCH_COMPILE_ENABLED:
+            return fn
+        return torch.compile(fn, dynamic=dynamic, fullgraph=fullgraph)
+    return decorator
+
+
 cap = torch.cuda.get_device_capability()
 USE_FA3 = cap == (9, 0)
 fa3 = None
@@ -338,7 +359,7 @@ polar_express_coeffs = [
     (2.3465413258596377, -1.7097828382687081, 0.42323551169305323),
 ]
 
-@torch.compile(dynamic=False, fullgraph=True)
+@maybe_torch_compile(dynamic=False, fullgraph=True)
 def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_t, eps_t, wd_t):
     p.mul_(1 - lr_t * wd_t)
     exp_avg.lerp_(grad, 1 - beta1_t)
@@ -349,7 +370,7 @@ def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_
     step_size = lr_t / bias1
     p.add_(exp_avg / denom, alpha=-step_size)
 
-@torch.compile(dynamic=False, fullgraph=True)
+@maybe_torch_compile(dynamic=False, fullgraph=True)
 def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momentum_buffer,
                     momentum_t, lr_t, wd_t, beta2_t, ns_steps, red_dim):
     # Nesterov momentum
@@ -542,19 +563,10 @@ optimizer = model.setup_optimizer(
     weight_decay=WEIGHT_DECAY,
 )
 
-compile_disable_reason = None
-if os.environ.get("AUTORESEARCH_DISABLE_TORCH_COMPILE") == "1":
-    compile_disable_reason = "AUTORESEARCH_DISABLE_TORCH_COMPILE=1"
-else:
-    compiler = os.environ.get("CC")
-    compiler_exe = compiler.split()[0] if compiler else "cc"
-    if shutil.which(compiler_exe) is None:
-        compile_disable_reason = f"C compiler {compiler_exe!r} not found"
-
-if compile_disable_reason is None:
+if TORCH_COMPILE_ENABLED:
     model = torch.compile(model, dynamic=False)
 else:
-    print(f"torch.compile disabled: {compile_disable_reason}")
+    print(f"torch.compile disabled: {TORCH_COMPILE_DISABLE_REASON}")
 
 train_loader = make_dataloader(tokenizer, DEVICE_BATCH_SIZE, MAX_SEQ_LEN, "train")
 x, y, epoch = next(train_loader)  # prefetch first batch

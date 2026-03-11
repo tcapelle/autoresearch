@@ -62,6 +62,7 @@ spec:
               export REPO_DIR=/workspace/repo
               export RUN_DIR=/mnt/autoresearch/jobs/"$JOB_NAME"
               export AUTORESEARCH_GIT_SHA="$(cat /workspace/git-sha.txt)"
+              export UV_LINK_MODE=copy
               mkdir -p "$RUN_DIR" "$AUTORESEARCH_CACHE_DIR" "$UV_CACHE_DIR"
               {
                 echo "job_name=$JOB_NAME"
@@ -185,6 +186,7 @@ spec:
               export REPO_DIR=/workspace/repo
               export RUN_DIR=/mnt/autoresearch/jobs/"$JOB_NAME"
               export AUTORESEARCH_GIT_SHA="$(cat /workspace/git-sha.txt)"
+              export UV_LINK_MODE=copy
               export HF_HOME="$RUN_DIR/hf-home"
               export XDG_CACHE_HOME="$RUN_DIR/xdg-cache"
               export TORCHINDUCTOR_CACHE_DIR="$RUN_DIR/torchinductor"
@@ -335,6 +337,7 @@ spec:
               export REPO_DIR=/workspace/repo
               export RUN_DIR=/mnt/autoresearch/jobs/"$JOB_NAME"
               export AUTORESEARCH_GIT_SHA="$(cat /workspace/git-sha.txt)"
+              export UV_LINK_MODE=copy
               export HF_HOME="$RUN_DIR/hf-home"
               export XDG_CACHE_HOME="$RUN_DIR/xdg-cache"
               export TORCHINDUCTOR_CACHE_DIR="$RUN_DIR/torchinductor"
