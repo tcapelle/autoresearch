@@ -1,30 +1,21 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: autoresearch-train
+  name: autoresearch-prepare
   labels:
     app: autoresearch
-    mode: train
+    mode: prepare
 spec:
   ttlSecondsAfterFinished: 604800
   backoffLimit: 0
   activeDeadlineSeconds: 1800
-  completionMode: Indexed
-  completions: 2
-  parallelism: 2
   template:
     metadata:
       labels:
         app: autoresearch
-        mode: train
+        mode: prepare
     spec:
       restartPolicy: Never
-      nodeSelector:
-        gpu.nvidia.com/class: rtxp6000-8x
-      tolerations:
-        - key: "nvidia.com/gpu"
-          operator: "Exists"
-          effect: "NoSchedule"
       initContainers:
         - name: clone-repo
           image: alpine/git:latest
@@ -41,11 +32,11 @@ spec:
             - name: workspace
               mountPath: /workspace
       containers:
-        - name: train
+        - name: prepare
           image: pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime
           imagePullPolicy: IfNotPresent
           workingDir: /workspace/repo
-          command: ["/bin/bash", "scripts/pai_train.sh"]
+          command: ["/bin/bash", "scripts/pai_prepare.sh"]
           env:
             - name: POD_NAME
               valueFrom:
@@ -61,45 +52,25 @@ spec:
               value: /mnt/autoresearch/uv-cache
             - name: RUNS_DIR
               value: /mnt/autoresearch/jobs
-            - name: GPU_COUNT
-              value: "1"
-            - name: CPU_REQUEST
-              value: "15995m"
-            - name: MEMORY_REQUEST
-              value: "131872185Ki"
-            - name: WANDB_PROJECT
-              value: autoresearch
-            - name: WANDB_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: autoresearch-wandb
-                  key: WANDB_API_KEY
-                  optional: true
+            - name: NUM_SHARDS
+              value: "10"
             - name: PYTHONUNBUFFERED
               value: "1"
           resources:
             requests:
-              nvidia.com/gpu: "1"
-              cpu: "15995m"
-              memory: "131872185Ki"
+              cpu: "4000m"
+              memory: "32Gi"
             limits:
-              nvidia.com/gpu: "1"
-              cpu: "15995m"
-              memory: "131872185Ki"
+              cpu: "4000m"
+              memory: "32Gi"
           volumeMounts:
             - name: shared
               mountPath: /mnt/autoresearch
             - name: workspace
               mountPath: /workspace
-            - name: dshm
-              mountPath: /dev/shm
       volumes:
         - name: shared
           persistentVolumeClaim:
             claimName: autoresearch-shared
         - name: workspace
           emptyDir: {}
-        - name: dshm
-          emptyDir:
-            medium: Memory
-            sizeLimit: 32Gi

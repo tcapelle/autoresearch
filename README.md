@@ -44,7 +44,7 @@ If the above commands all work ok, your setup is working and you can go into aut
 
 ## Run On `pai` Kubernetes
 
-This repo now uses plain Kubernetes manifests for `pai-amf1-cfd`. The jobs clone this GitHub repo from the branch baked into [k8s/run-jobs.yaml](k8s/run-jobs.yaml), preprocess onto the shared PVC, and then run `train.py` from that checkout.
+This repo now uses plain Kubernetes manifests for `pai-amf1-cfd`. The jobs clone this GitHub repo from the branch baked into the manifests, preprocess onto the shared PVC once, and then run `train.py` from that checkout.
 
 Apply the shared RWX PVC once:
 
@@ -60,26 +60,36 @@ kubectl --context pai-amf1-cfd create secret generic autoresearch-wandb \
   --dry-run=client -o yaml | kubectl --context pai-amf1-cfd apply -f -
 ```
 
-Launch the current bundle:
+Populate the PVC cache and tokenizer once:
+
+```bash
+kubectl --context pai-amf1-cfd apply -f k8s/prepare-job.yaml
+```
+
+Launch a batch of training runs:
 
 ```bash
 kubectl --context pai-amf1-cfd apply -f k8s/run-jobs.yaml
 ```
 
-To start a fresh batch later, delete the existing `Job` objects first or copy `k8s/run-jobs.yaml` and change the job names.
+To relaunch either Job, delete it first because Kubernetes Jobs are immutable after creation:
+
+```bash
+kubectl --context pai-amf1-cfd delete job autoresearch-prepare autoresearch-train --ignore-not-found
+```
 
 The bundle currently contains:
 
-- one CPU-only `prepare` job that writes data shards and tokenizer files to the shared PVC
-- two parallel `train` jobs that wait for those prepared PVC artifacts before starting
+- one small `prepare` manifest that writes data shards and tokenizer files to the shared PVC
+- one indexed `train` Job manifest that launches two parallel pods per apply
 - one-GPU training jobs on the `rtxp6000-8x` node pool with CPU and RAM set to allocatable resources divided by 8 (`15995m` CPU and `131872185Ki` memory)
 
 Useful commands:
 
 ```bash
 kubectl --context pai-amf1-cfd get jobs -l app=autoresearch
-kubectl --context pai-amf1-cfd logs -f job/autoresearch-train-pai-git-jobs-00
-kubectl --context pai-amf1-cfd logs -f job/autoresearch-train-pai-git-jobs-01
+kubectl --context pai-amf1-cfd get pods -l app=autoresearch,mode=train
+kubectl --context pai-amf1-cfd logs -f pod/<train-pod-name>
 ```
 
 The shared training cache is stored on the PVC through `AUTORESEARCH_CACHE_DIR`, so the tokenizer, data shards, HF cache, and `uv` wheel cache are reused across jobs. Logs, W&B files, and per-job caches are written under `/mnt/autoresearch/jobs/<job-name>/`.
